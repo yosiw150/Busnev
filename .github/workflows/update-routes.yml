@@ -1,5 +1,5 @@
 name: Update Routes DB
-"on":
+on:
   workflow_dispatch:
   schedule:
     - cron: '0 3 * * 0'
@@ -21,4 +21,3 @@ jobs:
           git add routes.json
           git diff --staged --quiet || git commit -m "routes $(date -u +%Y-%m-%d)"
           git push
-
