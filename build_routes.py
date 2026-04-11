@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
 """
-build_routes.py
----------------
-Downloads Israel Ministry of Transport GTFS zip,
-extracts routes + stops + stop_times,
-and outputs routes.json for the BusNav app.
-
-Output format:
-{
-  "updated": "2026-04-10",
-  "routes": {
-    "דן": {
-      "79": {
-        "name": "עיריית ת\"א / אבן גבירול ← אבן גבירול / בלוך",
-        "stops": [
-          {"n": "עיריית תל אביב / אבן גבירול", "la": 32.0673, "lo": 34.7813},
-          ...
-        ]
-      }
-    },
-    "אגד": { ... }
-  }
-}
+build_routes.py - Downloads Israel GTFS and builds routes.json
 """
-
+import ftplib
 import urllib.request
 import zipfile
 import io
@@ -31,13 +10,10 @@ import csv
 import json
 import datetime
 import os
-import sys
 
-GTFS_URL = "ftp://gtfs.mot.gov.il/israel-public-transportation.zip"
-# HTTP mirror (more reliable from GitHub Actions)
-GTFS_HTTP = "https://gtfs.mot.gov.il/israel-public-transportation.zip"
+FTP_HOST = "gtfs.mot.gov.il"
+FTP_FILE = "israel-public-transportation.zip"
 
-# Operator code → Hebrew name mapping
 AGENCY_MAP = {
     "3":  "אגד",
     "5":  "דן",
@@ -51,158 +27,118 @@ AGENCY_MAP = {
 }
 
 def download_gtfs():
-    print("Downloading GTFS...", flush=True)
+    print("Trying FTP download...", flush=True)
     try:
-        req = urllib.request.Request(GTFS_HTTP, headers={"User-Agent": "BusNav/1.0"})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            data = r.read()
-        print(f"Downloaded {len(data)//1024//1024} MB", flush=True)
-        return data
-    except Exception as e:
-        print(f"HTTP failed: {e}, trying FTP...", flush=True)
-        with urllib.request.urlopen(GTFS_URL, timeout=120) as r:
-            data = r.read()
+        buf = io.BytesIO()
+        with ftplib.FTP(FTP_HOST, timeout=120) as ftp:
+            ftp.login()
+            size = ftp.size(FTP_FILE)
+            print(f"File size: {size//1024//1024} MB", flush=True)
+            ftp.retrbinary(f"RETR {FTP_FILE}", buf.write)
+        data = buf.getvalue()
         print(f"Downloaded {len(data)//1024//1024} MB via FTP", flush=True)
         return data
+    except Exception as e:
+        print(f"FTP failed: {e}", flush=True)
 
-def read_csv_from_zip(zf, filename):
-    """Read a CSV file from the zip, return list of dicts."""
+    print("Trying HTTP download...", flush=True)
+    for url in [
+        f"https://{FTP_HOST}/{FTP_FILE}",
+        f"http://{FTP_HOST}/{FTP_FILE}",
+        f"http://199.203.58.18/{FTP_FILE}",
+    ]:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BusNav/1.0"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = r.read()
+            print(f"Downloaded {len(data)//1024//1024} MB from {url}", flush=True)
+            return data
+        except Exception as e:
+            print(f"  {url}: {e}", flush=True)
+
+    raise Exception("All download methods failed")
+
+def read_csv(zf, name):
     try:
-        with zf.open(filename) as f:
-            content = f.read().decode("utf-8-sig")
-            reader = csv.DictReader(io.StringIO(content))
-            return list(reader)
-    except KeyError:
-        print(f"  Warning: {filename} not found in zip", flush=True)
+        with zf.open(name) as f:
+            return list(csv.DictReader(io.StringIO(f.read().decode("utf-8-sig"))))
+    except Exception as e:
+        print(f"  Warning: {name}: {e}", flush=True)
         return []
 
-def build_routes(gtfs_data):
+def build_routes(data):
     print("Parsing GTFS...", flush=True)
-    zf = zipfile.ZipFile(io.BytesIO(gtfs_data))
+    zf = zipfile.ZipFile(io.BytesIO(data))
 
-    # 1. Read agencies
-    agencies = {}
-    for row in read_csv_from_zip(zf, "agency.txt"):
-        aid = row.get("agency_id","").strip()
-        name = row.get("agency_name","").strip()
-        agencies[aid] = AGENCY_MAP.get(aid, name)
+    agencies = {r["agency_id"].strip(): AGENCY_MAP.get(r["agency_id"].strip(), r["agency_name"].strip())
+                for r in read_csv(zf, "agency.txt")}
     print(f"  Agencies: {len(agencies)}", flush=True)
 
-    # 2. Read stops
-    stops_map = {}
-    for row in read_csv_from_zip(zf, "stops.txt"):
-        sid = row.get("stop_id","").strip()
-        stops_map[sid] = {
-            "n": row.get("stop_name","").strip(),
-            "la": float(row.get("stop_lat",0)),
-            "lo": float(row.get("stop_lon",0)),
-        }
+    stops_map = {r["stop_id"].strip(): {
+        "n": r["stop_name"].strip(),
+        "la": float(r["stop_lat"]),
+        "lo": float(r["stop_lon"])
+    } for r in read_csv(zf, "stops.txt")}
     print(f"  Stops: {len(stops_map)}", flush=True)
 
-    # 3. Read routes
-    routes_info = {}
-    for row in read_csv_from_zip(zf, "routes.txt"):
-        rid = row.get("route_id","").strip()
-        routes_info[rid] = {
-            "ref": row.get("route_short_name","").strip(),
-            "name": row.get("route_long_name","").strip(),
-            "agency": row.get("agency_id","").strip(),
-        }
+    routes_info = {r["route_id"].strip(): {
+        "ref": r["route_short_name"].strip(),
+        "name": r["route_long_name"].strip(),
+        "agency": r["agency_id"].strip()
+    } for r in read_csv(zf, "routes.txt")}
     print(f"  Routes: {len(routes_info)}", flush=True)
 
-    # 4. Read trips — one representative trip per route
-    trip_to_route = {}
-    route_to_trip = {}  # route_id → first trip_id
-    for row in read_csv_from_zip(zf, "trips.txt"):
-        rid = row.get("route_id","").strip()
-        tid = row.get("trip_id","").strip()
-        trip_to_route[tid] = rid
+    route_to_trip = {}
+    for r in read_csv(zf, "trips.txt"):
+        rid = r["route_id"].strip()
         if rid not in route_to_trip:
-            route_to_trip[rid] = tid
-    print(f"  Trips: {len(trip_to_route)}", flush=True)
+            route_to_trip[rid] = r["trip_id"].strip()
 
-    # 5. Read stop_times — only for representative trips
-    print("  Reading stop_times (this takes a while)...", flush=True)
-    wanted_trips = set(route_to_trip.values())
-    trip_stops = {}  # trip_id → ordered list of stop_ids
-
-    for row in read_csv_from_zip(zf, "stop_times.txt"):
-        tid = row.get("trip_id","").strip()
-        if tid not in wanted_trips:
+    wanted = set(route_to_trip.values())
+    print(f"  Reading stop_times for {len(wanted)} trips...", flush=True)
+    trip_stops = {}
+    for r in read_csv(zf, "stop_times.txt"):
+        tid = r["trip_id"].strip()
+        if tid not in wanted:
             continue
-        sid = row.get("stop_id","").strip()
-        seq = int(row.get("stop_sequence","0") or 0)
         if tid not in trip_stops:
             trip_stops[tid] = []
-        trip_stops[tid].append((seq, sid))
+        trip_stops[tid].append((int(r.get("stop_sequence", 0) or 0), r["stop_id"].strip()))
 
-    print(f"  Loaded stop_times for {len(trip_stops)} trips", flush=True)
-
-    # 6. Build output structure
-    output = {}  # agency_name → route_ref → {name, stops}
-
+    output = {}
     for rid, rinfo in routes_info.items():
         ref = rinfo["ref"]
         if not ref:
             continue
-        agency_id = rinfo["agency"]
-        agency_name = agencies.get(agency_id, agency_id)
+        aid = rinfo["agency"]
+        aname = agencies.get(aid, aid)
         tid = route_to_trip.get(rid)
         if not tid or tid not in trip_stops:
             continue
-
-        # Sort stops by sequence
-        sorted_stops = [s for _, s in sorted(trip_stops[tid])]
-        # Remove consecutive duplicates
         deduped = []
-        for s in sorted_stops:
-            if not deduped or deduped[-1] != s:
-                deduped.append(s)
-
-        # Build stop objects
-        stop_objs = []
-        for sid in deduped:
-            if sid in stops_map:
-                stop_objs.append(stops_map[sid])
-
+        for _, sid in sorted(trip_stops[tid]):
+            if not deduped or deduped[-1] != sid:
+                deduped.append(sid)
+        stop_objs = [stops_map[s] for s in deduped if s in stops_map]
         if len(stop_objs) < 2:
             continue
-
-        # Add to output
-        if agency_name not in output:
-            output[agency_name] = {}
-
-        # If ref already exists, keep the one with more stops
-        if ref in output[agency_name]:
-            if len(stop_objs) > len(output[agency_name][ref]["stops"]):
-                output[agency_name][ref] = {
-                    "name": rinfo["name"],
-                    "stops": stop_objs,
-                }
-        else:
-            output[agency_name][ref] = {
-                "name": rinfo["name"],
-                "stops": stop_objs,
-            }
+        if aname not in output:
+            output[aname] = {}
+        if ref not in output[aname] or len(stop_objs) > len(output[aname][ref]["stops"]):
+            output[aname][ref] = {"name": rinfo["name"], "stops": stop_objs}
 
     total = sum(len(v) for v in output.values())
     print(f"  Built {total} routes across {len(output)} operators", flush=True)
     return output
 
 def main():
-    gtfs_data = download_gtfs()
-    routes = build_routes(gtfs_data)
-
-    today = datetime.date.today().isoformat()
-    result = {"updated": today, "routes": routes}
-
-    out_path = os.path.join(os.path.dirname(__file__), "routes.json")
-    print(f"Writing {out_path}...", flush=True)
-    with open(out_path, "w", encoding="utf-8") as f:
+    data = download_gtfs()
+    routes = build_routes(data)
+    result = {"updated": datetime.date.today().isoformat(), "routes": routes}
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "routes.json")
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-
-    size_mb = os.path.getsize(out_path) / 1024 / 1024
-    print(f"Done! routes.json = {size_mb:.1f} MB", flush=True)
+    print(f"Done! routes.json = {os.path.getsize(path)//1024//1024} MB", flush=True)
 
 if __name__ == "__main__":
     main()
