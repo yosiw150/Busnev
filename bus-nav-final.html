@@ -488,7 +488,7 @@ function updateETA(lat,lon,kmh){
 const INTERNAL_DB={
   'דן':{
     '79':{n:'עיריית ת"א/אבן גבירול ← סיבובי',s:[
-      {n:'עיריית תל אביב - יפו/אבן גבירול', la:32.0673,lo:34.7818},
+      {n:'עיריית תל אביב - יפו/אבן גבירול', la:32.0817,lo:34.7811},
       {n:'כיכר רבין/מלכי ישראל',             la:32.0799,lo:34.7807},
       {n:"המלך ג'ורג'/זמנהוף",               la:32.0763,lo:34.7775},
       {n:"דיזנגוף סנטר/המלך ג'ורג'",         la:32.0719,lo:34.7742},
@@ -501,7 +501,7 @@ const INTERNAL_DB={
       {n:"המלך ג'ורג'/שדרות בן ציון",        la:32.0699,lo:34.7779},
       {n:"כיכר מסריק/המלך ג'ורג'",           la:32.0730,lo:34.7771},
       {n:'כיכר רבין/מלכי ישראל',             la:32.0800,lo:34.7808},
-      {n:'עיריית תל אביב - יפו/אבן גבירול',  la:32.0673,lo:34.7818},
+      {n:'עיריית תל אביב - יפו/אבן גבירול',  la:32.0817,lo:34.7811},
     ]},
   },
 };
@@ -527,7 +527,14 @@ async function doFetch(){
     document.getElementById('bst').disabled=false;
   }
 
-  // 1. routesDB (GTFS) — הכי מהיר, הכי מלא
+  // 1. מאגר פנימי — עדיפות ראשונה (נתונים מדויקים ידניים)
+  const internal=INTERNAL_DB[co]?.[ln];
+  if(internal){
+    applyRoute(internal.s.map(s=>({n:s.n,la:s.la,lo:s.lo})),co+' — '+internal.n,'מאגר');
+    return;
+  }
+
+  // 2. routesDB (OSM) — מהיר, מכיל את רוב הקווים
   if(routesDB){
     // חפש בחברה שנבחרה
     if(routesDB[co]?.[ln]){
@@ -543,13 +550,6 @@ async function doFetch(){
         return;
       }
     }
-  }
-
-  // 2. מאגר פנימי (קווים חדשים שעדיין לא ב-GTFS)
-  const internal=INTERNAL_DB[co]?.[ln];
-  if(internal){
-    applyRoute(internal.s.map(s=>({n:s.n,la:s.la,lo:s.lo})),co+' — '+internal.n,'מאגר');
-    return;
   }
 
   // 3. OSM (גיבוי אחרון)
