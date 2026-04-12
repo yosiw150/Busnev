@@ -846,17 +846,37 @@ function renderSetup(arr){
   if(!arr||!arr.length){sec.style.display='none';document.getElementById('bst').disabled=true;return;}
   sec.style.display='block';
   const cls={s:'ds',r:'dr',l:'dl',a:'da'};
-  sl.innerHTML=arr.map((s,i)=>{const d=DIR[s.d]||DIR.s;return`
-    <div class="srow">
+  sl.innerHTML=arr.map((s,i)=>{
+    const d=DIR[s.d]||DIR.s;
+    const coord=s.la
+      ? `<div class="sco" style="color:#6ee7b7">📍 ${s.la.toFixed(4)}, ${s.lo.toFixed(4)}</div>`
+      : `<div class="sco" style="color:#ef4444">⚠️ אין קואורדינטות</div>`;
+    return`<div class="srow" style="flex-wrap:wrap;gap:4px">
       <div class="sn">${i+1}</div>
       <div class="sc">
         <div class="snm">${s.n}</div>
-        ${s.la?`<div class="sco">📍${s.la.toFixed(4)},${s.lo.toFixed(4)}</div>`:'<div class="sco" style="color:#ef4444">⚠️ אין קואורדינטות</div>'}
+        ${coord}
       </div>
       <span class="sdg ${cls[s.d]||'ds'}">${d.ar} ${d.tx}</span>
-      <button onclick="delStop(${i})" style="background:none;border:none;color:#ef4444;font-size:16px;cursor:pointer;padding:0 4px;flex-shrink:0">✕</button>
-    </div>`;}).join('');
-  document.getElementById('bst').disabled=false;
+      <div style="display:flex;gap:3px;flex-shrink:0">
+        <button onclick="insertStop(${i})" title="הוסף לפני" style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);color:#93c5fd;font-size:12px;padding:2px 7px;border-radius:5px;cursor:pointer">↑+</button>
+        <button onclick="insertStop(${i+1})" title="הוסף אחרי" style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);color:#93c5fd;font-size:12px;padding:2px 7px;border-radius:5px;cursor:pointer">↓+</button>
+        <button onclick="delStop(${i})" title="מחק" style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);color:#fca5a5;font-size:14px;padding:2px 7px;border-radius:5px;cursor:pointer">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('bst').disabled=arr.length<2;
+}
+
+// Insert stop at specific position
+let insertIdx=null;
+function insertStop(idx){
+  insertIdx=idx;
+  const n=document.getElementById('an');
+  n.focus();
+  n.placeholder=idx===stops.length ? 'שם תחנה — יתווסף לסוף' : `שם תחנה — יתווסף לפני תחנה ${idx+1}`;
+  document.getElementById('geoStatus').textContent=`📌 תוספת לפני תחנה ${idx+1}`;
+  document.getElementById('geoStatus').style.color='#93c5fd';
 }
 
 function delStop(i){
@@ -900,7 +920,14 @@ async function addM(){
     setTimeout(()=>{gs.textContent='';},3000);
   }
 
-  stops.push({n:name,d:d.value,la,lo});
+  const newStop={n:name,d:d.value,la,lo};
+  if(insertIdx!==null && insertIdx<=stops.length){
+    stops.splice(insertIdx,0,newStop);
+    insertIdx=null;
+    document.getElementById('an').placeholder='שם תחנה או כתובת מדויקת…';
+  }else{
+    stops.push(newStop);
+  }
   n.value='';
   renderSetup(stops);
   saveLastRoute();
