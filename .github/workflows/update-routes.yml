@@ -10,11 +10,94 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Download GTFS and build routes
-        run: python build_routes.py
+      - name: Build routes.json from OpenStreetMap
+        run: |
+          node - << 'JSEOF'
+          const https = require('https');
+          const fs = require('fs');
+
+          const query = `[out:json][timeout:120];(relation["type"="route"]["route"="bus"](29.4,34.2,33.4,35.9););out body;>;out skel qt;`;
+
+          const postData = 'data=' + encodeURIComponent(query);
+
+          const options = {
+            hostname: 'overpass-api.de',
+            path: '/api/interpreter',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Content-Length': Buffer.byteLength(postData),
+              'User-Agent': 'BusNav/1.0'
+            }
+          };
+
+          const OPERATOR_MAP = {
+            'dan': 'דן', 'egged': 'אגד', 'metropoline': 'מטרופולין',
+            'kavim': 'קווים', 'afikim': 'אפיקים', 'superbus': 'סופרבוס',
+            'nta': 'נתע', 'נתיב': 'נתיב אקספרס'
+          };
+
+          function normalizeOp(op) {
+            if (!op) return 'אחר';
+            const low = op.toLowerCase();
+            for (const [k, v] of Object.entries(OPERATOR_MAP)) {
+              if (low.includes(k)) return v;
+            }
+            return op.trim();
+          }
+
+          console.log('Querying Overpass API...');
+          const req = https.request(options, (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+              const data = JSON.parse(body);
+              const nodeMap = {};
+              data.elements.forEach(el => { if (el.type === 'node') nodeMap[el.id] = el; });
+              const relations = data.elements.filter(el => el.type === 'relation');
+              console.log('Relations:', relations.length);
+
+              const output = {};
+              for (const rel of relations) {
+                const tags = rel.tags || {};
+                const ref = (tags.ref || '').trim();
+                if (!ref) continue;
+                const operator = normalizeOp(tags.operator || tags.network || '');
+                const stops = [];
+                const seen = new Set();
+                for (const m of (rel.members || [])) {
+                  if (m.type !== 'node') continue;
+                  const roles = ['stop','stop_entry_only','stop_exit_only','platform',''];
+                  if (!roles.includes(m.role || '')) continue;
+                  const node = nodeMap[m.ref];
+                  if (!node) continue;
+                  const nt = node.tags || {};
+                  const name = nt['name:he'] || nt.name || ('תחנה ' + (stops.length + 1));
+                  if (node.lat == null) continue;
+                  const key = node.lat.toFixed(4) + ',' + node.lon.toFixed(4);
+                  if (seen.has(key)) continue;
+                  seen.add(key);
+                  stops.push({ n: name, la: node.lat, lo: node.lon });
+                }
+                if (stops.length < 2) continue;
+                if (!output[operator]) output[operator] = {};
+                const existing = output[operator][ref];
+                if (!existing || stops.length > existing.stops.length) {
+                  output[operator][ref] = { name: tags.name || ('קו ' + ref), stops };
+                }
+              }
+              const total = Object.values(output).reduce((s, v) => s + Object.keys(v).length, 0);
+              console.log('Routes:', total, 'Operators:', Object.keys(output).length);
+              const result = { updated: new Date().toISOString().slice(0,10), routes: output };
+              fs.writeFileSync('routes.json', JSON.stringify(result));
+              const mb = (fs.statSync('routes.json').size / 1024 / 1024).toFixed(1);
+              console.log('Done! routes.json =', mb, 'MB');
+            });
+          });
+          req.on('error', e => { console.error(e); process.exit(1); });
+          req.write(postData);
+          req.end();
+          JSEOF
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
