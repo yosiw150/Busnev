@@ -211,6 +211,23 @@ body.night .ddist{color:#ccc}
     </div>
   </div>
 
+  <!-- Info bar: current street + speed + remaining stops -->
+  <div id="infoBar" style="display:none;background:var(--s2);border-bottom:1px solid var(--br);padding:6px 14px;flex-shrink:0;z-index:999;display:flex;align-items:center;gap:10px">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:10px;color:var(--m);font-weight:700">רחוב נוכחי</div>
+      <div id="curStreet" style="font-size:calc(13px * var(--fs));font-weight:600;color:var(--t);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">—</div>
+    </div>
+    <div id="speedBox" style="text-align:center;flex-shrink:0;background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.25);border-radius:8px;padding:4px 10px;transition:all .3s">
+      <div id="speedVal" style="font-size:20px;font-weight:900;color:#6ee7b7;font-family:monospace;line-height:1">0</div>
+      <div style="font-size:9px;color:var(--m)">קמ"ש</div>
+      <div id="maxspeedVal" style="font-size:9px;color:var(--m);font-family:monospace">—</div>
+    </div>
+    <div style="text-align:center;flex-shrink:0;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:4px 10px">
+      <div id="remStops" style="font-size:20px;font-weight:900;color:var(--a);font-family:monospace;line-height:1">—</div>
+      <div style="font-size:9px;color:var(--m)">תחנות</div>
+    </div>
+  </div>
+
   <div class="gbar" id="gbar"><div class="gspin" id="gspin"></div><span id="gtxt">מחפש GPS…</span></div>
   <div class="nn2" id="nn2"></div>
 
@@ -239,12 +256,14 @@ body.night .ddist{color:#ccc}
     </div>
     <!-- ETA boxes -->
     <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0;align-items:flex-end">
-      <div style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:5px 10px;text-align:center;min-width:64px">
+      <div style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:5px 10px;text-align:center;min-width:70px">
         <div class="detv" id="detv" style="color:#93c5fd">—</div>
+        <div id="etaNextTime" style="font-size:11px;color:#93c5fd;font-family:monospace">—:—</div>
         <div class="detl" style="color:#93c5fd">לתחנה</div>
       </div>
-      <div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:5px 10px;text-align:center;min-width:64px">
+      <div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:5px 10px;text-align:center;min-width:70px">
         <div class="detv" id="etaFinal" style="color:var(--a)">—</div>
+        <div id="etaFinalTime" style="font-size:11px;color:var(--a);font-family:monospace">—:—</div>
         <div class="detl" style="color:var(--a)">לסוף קו</div>
       </div>
     </div>
@@ -602,22 +621,165 @@ function calcETA(currentLat,currentLon,currentKmh,fromStopIdx){
   return Math.max(1,Math.round(totalMin));
 }
 
+function minsToTime(mins){
+  const now=new Date();
+  now.setMinutes(now.getMinutes()+mins);
+  return String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+}
+
 function updateETA(lat,lon,kmh){
-  // ETA to NEXT stop only
-  if(ci>=stops.length){document.getElementById('detv').textContent='—';document.getElementById('etaFinal').textContent='—';return;}
+  if(ci>=stops.length){
+    document.getElementById('detv').textContent='—';
+    document.getElementById('etaFinal').textContent='—';
+    return;
+  }
   const s=stops[ci];
-  let etaNext='—';
+  let etaNext=null;
   if(s?.la&&lat!=null){
     const d=hav(lat,lon,s.la,s.lo);
     const mpm=(kmh>3?kmh:DEFAULT_KMH)*1000/60;
     etaNext=Math.max(1,Math.round(d/mpm));
   }
-  document.getElementById('detv').textContent=etaNext;
+  document.getElementById('detv').textContent=etaNext||'—';
+  document.getElementById('etaNextTime').textContent=etaNext?minsToTime(etaNext):'—:—';
+
+  // תחנות נותרות
+  const rem=stops.length-1-ci;
+  document.getElementById('remStops').textContent=rem;
 
   // ETA to FINAL stop
-  if(ci>=stops.length-1){document.getElementById('etaFinal').textContent='🏁';return;}
+  if(ci>=stops.length-1){
+    document.getElementById('etaFinal').textContent='🏁';
+    document.getElementById('etaFinalTime').textContent='';
+    return;
+  }
   const etaEnd=calcETA(lat,lon,kmh,ci);
   document.getElementById('etaFinal').textContent=etaEnd;
+  document.getElementById('etaFinalTime').textContent=minsToTime(etaEnd);
+}
+
+// ══════════════════════════════════════════════════
+//  SPEED LIMIT — מגבלת מהירות מ-OSM
+// ══════════════════════════════════════════════════
+let currentMaxSpeed=null;
+let lastMaxSpeedFetch=0;
+let isOverSpeed=false;
+let beepInterval=null;
+let audioCtx=null;
+
+function getAudioCtx(){
+  if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function beep(freq=880,dur=0.15){
+  try{
+    const ctx=getAudioCtx();
+    const osc=ctx.createOscillator();
+    const gain=ctx.createGain();
+    osc.connect(gain);gain.connect(ctx.destination);
+    osc.frequency.value=freq;
+    osc.type='square';
+    gain.gain.setValueAtTime(0.3,ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+dur);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime+dur);
+  }catch(e){}
+}
+
+function startSpeedAlert(){
+  if(beepInterval)return;
+  beepInterval=setInterval(()=>beep(1200,0.1),1500);
+}
+function stopSpeedAlert(){
+  if(beepInterval){clearInterval(beepInterval);beepInterval=null;}
+}
+
+function updateSpeedDisplay(kmh){
+  const box=document.getElementById('speedBox');
+  const val=document.getElementById('speedVal');
+  val.textContent=kmh;
+  if(currentMaxSpeed&&kmh>currentMaxSpeed){
+    // חריגה!
+    if(!isOverSpeed){
+      isOverSpeed=true;
+      startSpeedAlert();
+    }
+    box.style.background='rgba(239,68,68,.3)';
+    box.style.border='2px solid #ef4444';
+    box.style.animation='flash-r .5s ease infinite';
+    val.style.color='#fca5a5';
+  }else{
+    if(isOverSpeed){
+      isOverSpeed=false;
+      stopSpeedAlert();
+    }
+    box.style.background='rgba(16,185,129,.1)';
+    box.style.border='1px solid rgba(16,185,129,.25)';
+    box.style.animation='none';
+    val.style.color='#6ee7b7';
+  }
+}
+
+async function fetchMaxSpeed(lat,lon){
+  const now=Date.now();
+  if(now-lastMaxSpeedFetch<15000)return;
+  lastMaxSpeedFetch=now;
+  try{
+    // שליפת הדרך הקרובה ביותר עם maxspeed
+    const q=`[out:json][timeout:5];way["highway"](around:25,${lat},${lon});out tags;`;
+    const res=await fetch('https://overpass-api.de/api/interpreter',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'data='+encodeURIComponent(q)
+    });
+    if(!res.ok)return;
+    const data=await res.json();
+    // מצא דרך עם maxspeed
+    for(const way of data.elements){
+      const ms=way.tags?.maxspeed;
+      if(ms){
+        const val=parseInt(ms);
+        if(!isNaN(val)){
+          currentMaxSpeed=val;
+          document.getElementById('maxspeedVal').textContent='מקס '+val;
+          return;
+        }
+      }
+    }
+    // אם אין maxspeed — ברירת מחדל לפי סוג דרך
+    for(const way of data.elements){
+      const hw=way.tags?.highway;
+      const defaults={motorway:110,trunk:90,primary:80,secondary:60,
+                      tertiary:50,residential:30,service:20,living_street:10};
+      if(hw&&defaults[hw]){
+        currentMaxSpeed=defaults[hw];
+        document.getElementById('maxspeedVal').textContent='~'+defaults[hw];
+        return;
+      }
+    }
+  }catch(e){}
+}
+let lastStreet='';
+async function updateCurrentStreet(lat,lon){
+  const now=Date.now();
+  if(now-lastStreetFetch<20000)return; // עדכון כל 20 שניות
+  lastStreetFetch=now;
+  try{
+    const res=await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&accept-language=he&zoom=17`,
+      {headers:{'Accept':'application/json'}}
+    );
+    if(res.ok){
+      const d=await res.json();
+      const a=d.address||{};
+      const street=a.road||a.pedestrian||a.footway||a.street||'';
+      if(street&&street!==lastStreet){
+        lastStreet=street;
+        document.getElementById('curStreet').textContent=street;
+      }
+    }
+  }catch(e){}
 }
 
 // ══════════════════════════════════════════════════
@@ -1032,6 +1194,7 @@ function stopNav(){
   if(watchId)navigator.geolocation.clearWatch(watchId);
   if(autoInt)clearInterval(autoInt);
   if(clockInt)clearInterval(clockInt);
+  stopSpeedAlert();
   if(window.speechSynthesis)speechSynthesis.cancel();
   autoRun=false;gpsOn=false;nearDone=false;
   document.getElementById('abtn').textContent='▶ אוטו׳';
@@ -1065,6 +1228,16 @@ function startGPS(){
     checkProx(lat,lon,speed);
     updateMapPos(lat,lon);
     updateTurnByPosition(lat,lon);
+
+    // מד מהירות + מגבלה
+    const kmh=speed?Math.round(speed*3.6):0;
+    updateSpeedDisplay(kmh);
+    document.getElementById('infoBar').style.display='flex';
+
+    // רחוב נוכחי + מגבלת מהירות
+    updateCurrentStreet(lat,lon);
+    fetchMaxSpeed(lat,lon);
+
     // Fetch new route when stop changes or every 30sec
     if(ci<stops.length&&stops[ci]?.la){
       fetchOSRMRoute(lat,lon,stops[ci].la,stops[ci].lo);
