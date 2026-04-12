@@ -826,6 +826,13 @@ function startNav(){
   initMap();updateUI();startGPS();
   updateClock();
   clockInt=setInterval(updateClock,10000);
+  // Show start choice immediately
+  setTimeout(()=>{
+    if(!nearDone){
+      nearDone=true;
+      showStartDialog(0,0,null,null);
+    }
+  },2000);
   setTimeout(()=>spk('קו '+lineName+' מתחיל',true),700);
 }
 function stopNav(){
@@ -859,7 +866,9 @@ function startGPS(){
     myLat=lat;myLon=lon;
     if(accuracy<120){bar.className='gbar fnd show';sp.style.display='none';txt.textContent='✅ GPS — דיוק '+Math.round(accuracy)+' מ׳';setTimeout(()=>bar.classList.remove('show'),4000);}
     else{bar.className='gbar sea show';sp.style.display='block';txt.textContent='מחכה לדיוק… ('+Math.round(accuracy)+' מ׳)';}
-    if(!nearDone&&accuracy<200){nearDone=true;jumpNearest(lat,lon);}
+    if(!nearDone&&accuracy<500){nearDone=true;jumpNearest(lat,lon);}
+    // If accuracy still bad after 20sec, show dialog anyway
+    if(!nearDone){setTimeout(()=>{if(!nearDone){nearDone=true;jumpNearest(lat,lon);}},20000);}
     checkProx(lat,lon,speed);
     updateMapPos(lat,lon);
     updateTurnByPosition(lat,lon);
@@ -904,26 +913,31 @@ function jumpNearest(lat,lon){
 
 function showStartDialog(nearIdx,nearDist,lat,lon){
   const nearName=stops[nearIdx].n;
+  const isPreGPS=(lat===null);
   const dlg=document.createElement('div');
   dlg.style.cssText='position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:20px';
   dlg.innerHTML=`
     <div style="background:#111827;border:1px solid #1e2d45;border-radius:18px;padding:22px;max-width:340px;width:100%;text-align:center">
-      <div style="font-size:30px;margin-bottom:10px">📍</div>
+      <div style="font-size:30px;margin-bottom:10px">🚌</div>
       <div style="font-size:16px;font-weight:700;color:#f1f5f9;margin-bottom:6px">מאיפה להתחיל?</div>
       <div style="font-size:13px;color:#64748b;margin-bottom:18px">
-        זוהה מיקומך ${Math.round(nearDist)} מ' מ<br>
-        <b style="color:#93c5fd">${nearName}</b>
+        ${isPreGPS ? 'בחר תחנת התחלה:' : `זוהה מיקומך ${Math.round(nearDist)} מ' מ<br><b style="color:#93c5fd">${nearName}</b>`}
       </div>
       <div style="display:flex;flex-direction:column;gap:10px">
-        <button onclick="chooseStart(${nearIdx},this.closest('[style*=fixed]'))" 
+        ${!isPreGPS && nearIdx>0 ? `
+        <button onclick="chooseStart(${nearIdx},this.closest('[style*=fixed]'))"
           style="background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.4);color:#93c5fd;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
           📍 תחנה קרובה (${nearIdx+1})<br>
           <span style="font-size:11px;font-weight:400">${nearName}</span>
-        </button>
+        </button>` : ''}
         <button onclick="chooseStart(0,this.closest('[style*=fixed]'))"
           style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fcd34d;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
           🚏 תחנה ראשונה (1)<br>
           <span style="font-size:11px;font-weight:400">${stops[0].n}</span>
+        </button>
+        <button onclick="chooseStart(-1,this.closest('[style*=fixed]'))"
+          style="background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);color:#6ee7b7;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+          📡 זהה מיקום אוטומטית
         </button>
       </div>
     </div>`;
@@ -932,6 +946,12 @@ function showStartDialog(nearIdx,nearDist,lat,lon){
 
 function chooseStart(idx,dlg){
   if(dlg)dlg.remove();
+  if(idx===-1){
+    // Wait for GPS to detect nearest stop
+    nearDone=false;
+    toast('📡 ממתין לזיהוי GPS…');
+    return;
+  }
   if(idx===ci&&ci===0)return;
   ci=idx;updateUI();refreshStopColors();
   if(stops[ci]?.la){
