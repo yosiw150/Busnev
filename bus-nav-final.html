@@ -179,10 +179,15 @@ body.night .ddist{color:#ccc}
     </div>
     <div style="margin-top:12px">
       <span class="lbl" style="margin-bottom:6px">✏️ הוספה ידנית</span>
-      <div class="adr">
-        <input id="an" type="text" placeholder="שם תחנה" onkeydown="if(event.key==='Enter')addM()"/>
-        <select id="ad"><option value="s">⬆️ ישר</option><option value="r">↗️ ימינה</option><option value="l">↖️ שמאלה</option><option value="a">🛑 עצור</option></select>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:6px;margin-bottom:6px">
+        <input id="an" type="text" placeholder="שם תחנה או כתובת מדויקת…"
+          style="padding:8px 10px;font-size:13px;background:var(--s2);border:1px solid var(--br);color:var(--t);border-radius:8px;outline:none"
+          onkeydown="if(event.key==='Enter')addM()"/>
         <button class="badd" onclick="addM()">＋</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <select id="ad" style="flex:1"><option value="s">⬆️ ישר</option><option value="r">↗️ ימינה</option><option value="l">↖️ שמאלה</option><option value="a">🛑 עצור</option></select>
+        <div id="geoStatus" style="font-size:11px;color:var(--m);display:flex;align-items:center;flex:1"></div>
       </div>
     </div>
   </div>
@@ -615,7 +620,82 @@ const INTERNAL_DB={
 // ══════════════════════════════════════════════════
 //  FETCH
 // ══════════════════════════════════════════════════
-function setFst(type,msg){const el=document.getElementById('fst');el.className='fst '+type;document.getElementById('spin').style.display=type==='ld'?'block':'none';document.getElementById('fmsg').textContent=msg;}
+function setFst(type,msg,isHtml=false){
+  const el=document.getElementById('fst');
+  el.className='fst '+type;
+  document.getElementById('spin').style.display=type==='ld'?'block':'none';
+  if(isHtml)document.getElementById('fmsg').innerHTML=msg;
+  else document.getElementById('fmsg').textContent=msg;
+}
+
+async function fetchFromOSM(ln){
+  document.getElementById('bf').disabled=true;
+  setFst('ld','מחפש קו '+ln+' ב-OpenStreetMap…');
+  try{
+    const q=`[out:json][timeout:30];(relation["type"="route"]["route"="bus"]["ref"="${ln}"](29.4,34.2,33.4,35.9););out body;>;out skel qt;`;
+    const res=await fetch('https://overpass-api.de/api/interpreter',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    const raw=parseBestOverpass(data);
+    if(raw&&raw.length>=2){
+      setFst('ld','נמצאו '+raw.length+' תחנות, מוסיף כתובות…');
+      await geocodeUnnamed(raw);
+      stops=buildStops(raw);lineName=ln;routeName=co+' — קו '+ln;
+      setFst('ok','✓ קו '+ln+' עודכן מ-OSM — '+stops.length+' תחנות',false);
+      document.getElementById('stag').textContent='🗺 OSM';
+      document.getElementById('nb').textContent='קו '+ln;
+      document.getElementById('nm').textContent=routeName;
+      renderSetup(stops);
+      saveLastRoute();
+    }else{
+      setFst('er','קו '+ln+' לא נמצא ב-OSM. נשמר המאגר הפנימי.');
+    }
+  }catch(e){setFst('er','שגיאה: '+e.message);}
+  document.getElementById('bf').disabled=false;
+  document.getElementById('bst').disabled=stops.length<2;
+}
+
+// ══════════════════════════════════════════════════
+//  SAVE / LOAD LAST ROUTE
+// ══════════════════════════════════════════════════
+const LAST_KEY = 'busnav_last';
+
+function saveLastRoute(){
+  try{
+    localStorage.setItem(LAST_KEY, JSON.stringify({
+      co, ln:lineName,
+      stops: stops.map(s=>({n:s.n,la:s.la,lo:s.lo,d:s.d}))
+    }));
+  }catch(e){}
+}
+
+function loadLastRoute(){
+  try{
+    const saved=localStorage.getItem(LAST_KEY);
+    if(!saved)return;
+    const data=JSON.parse(saved);
+    if(!data?.stops?.length)return;
+    // Restore company selection
+    co=data.co||'דן';
+    document.querySelectorAll('.cop').forEach(el=>{
+      el.classList.toggle('on', el.dataset.co===co);
+    });
+    // Restore line number
+    document.getElementById('ln').value=data.ln||'';
+    lineName=data.ln||'';
+    routeName=co+' — קו '+lineName;
+    document.getElementById('nb').textContent='קו '+lineName;
+    document.getElementById('nm').textContent=routeName;
+    // Restore stops
+    stops=data.stops;
+    setFst('ok','✓ קו '+lineName+' — '+stops.length+' תחנות (שמור)');
+    document.getElementById('stag').textContent='💾 שמור';
+    renderSetup(stops);
+  }catch(e){}
+}
+
+// Load on page open
+window.addEventListener('DOMContentLoaded', ()=>setTimeout(loadLastRoute,500));
 
 async function doFetch(){
   const ln=document.getElementById('ln').value.trim();
@@ -625,40 +705,44 @@ async function doFetch(){
   function applyRoute(raw,name,src){
     stops=buildStops(raw);lineName=ln;routeName=name;
     setFst('ok','✓ קו '+ln+' — '+stops.length+' תחנות ('+src+')');
-    document.getElementById('stag').textContent=src==='GTFS'?'📋 GTFS':src==='מאגר'?'📍 מאגר':'🗺 OSM';
+    document.getElementById('stag').textContent=src==='מאגר'?'📍 מאגר':src==='שמור'?'💾 שמור':'🗺 OSM';
     document.getElementById('nb').textContent='קו '+ln;
     document.getElementById('nm').textContent=routeName;
     renderSetup(stops);
     document.getElementById('bf').disabled=false;
     document.getElementById('bst').disabled=false;
+    saveLastRoute();
   }
 
-  // 1. מאגר פנימי — עדיפות ראשונה (נתונים מדויקים ידניים)
+  // 1. מאגר פנימי — עדיפות ראשונה תמיד
   const internal=INTERNAL_DB[co]?.[ln];
   if(internal){
     applyRoute(internal.s.map(s=>({n:s.n,la:s.la,lo:s.lo})),co+' — '+internal.n,'מאגר');
+    // הצג כפתור עדכון מ-OSM
+    setTimeout(()=>{
+      const fmsg=document.getElementById('fmsg');
+      if(fmsg)fmsg.innerHTML='✓ קו '+ln+' — '+internal.s.length+' תחנות (מאגר פנימי) &nbsp;<button onclick="fetchFromOSM(\''+ln+'\')" style="background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.4);color:#93c5fd;padding:3px 10px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit">🔄 עדכן מ-OSM</button>';
+    },50);
     return;
   }
 
-  // 2. routesDB (OSM) — מהיר, מכיל את רוב הקווים
+  // 2. routesDB (OSM שמור) — רק אם אין במאגר הפנימי
   if(routesDB){
-    // חפש בחברה שנבחרה
     if(routesDB[co]?.[ln]){
       const r=routesDB[co][ln];
-      applyRoute(r.stops.map(s=>({n:s.n,la:s.la,lo:s.lo})),co+' — '+(r.name||'קו '+ln),'GTFS');
+      applyRoute(r.stops.map(s=>({n:s.n,la:s.la,lo:s.lo})),co+' — '+(r.name||'קו '+ln),'OSM');
       return;
     }
-    // חפש בכל החברות
     for(const [coName,coRoutes] of Object.entries(routesDB)){
       if(coRoutes[ln]){
         const r=coRoutes[ln];
-        applyRoute(r.stops.map(s=>({n:s.n,la:s.la,lo:s.lo})),coName+' — '+(r.name||'קו '+ln),'GTFS');
+        applyRoute(r.stops.map(s=>({n:s.n,la:s.la,lo:s.lo})),coName+' — '+(r.name||'קו '+ln),'OSM');
         return;
       }
     }
   }
 
-  // 3. OSM (גיבוי אחרון)
+  // 3. Overpass בזמן אמת — גיבוי אחרון
   setFst('ld','מחפש קו '+ln+' ב-OpenStreetMap…');
   try{
     const q=`[out:json][timeout:30];(relation["type"="route"]["route"="bus"]["ref"="${ln}"](29.4,34.2,33.4,35.9););out body;>;out skel qt;`;
@@ -671,7 +755,7 @@ async function doFetch(){
       await geocodeUnnamed(raw);
       applyRoute(raw,co+' — קו '+ln,'OSM');
     }else{
-      setFst('er','קו '+ln+' לא נמצא. לחץ 🔄 לרענן מאגר או הוסף ידנית.');
+      setFst('er','קו '+ln+' לא נמצא. הוסף ידנית.');
     }
   }catch(e){setFst('er','שגיאה: '+e.message);}
   document.getElementById('bf').disabled=false;
@@ -762,10 +846,65 @@ function renderSetup(arr){
   if(!arr||!arr.length){sec.style.display='none';document.getElementById('bst').disabled=true;return;}
   sec.style.display='block';
   const cls={s:'ds',r:'dr',l:'dl',a:'da'};
-  sl.innerHTML=arr.map((s,i)=>{const d=DIR[s.d]||DIR.s;return`<div class="srow"><div class="sn">${i+1}</div><div class="sc"><div class="snm">${s.n}</div>${s.la?`<div class="sco">📍${s.la.toFixed(4)},${s.lo.toFixed(4)}</div>`:''}</div><span class="sdg ${cls[s.d]||'ds'}">${d.ar} ${d.tx}</span></div>`;}).join('');
+  sl.innerHTML=arr.map((s,i)=>{const d=DIR[s.d]||DIR.s;return`
+    <div class="srow">
+      <div class="sn">${i+1}</div>
+      <div class="sc">
+        <div class="snm">${s.n}</div>
+        ${s.la?`<div class="sco">📍${s.la.toFixed(4)},${s.lo.toFixed(4)}</div>`:'<div class="sco" style="color:#ef4444">⚠️ אין קואורדינטות</div>'}
+      </div>
+      <span class="sdg ${cls[s.d]||'ds'}">${d.ar} ${d.tx}</span>
+      <button onclick="delStop(${i})" style="background:none;border:none;color:#ef4444;font-size:16px;cursor:pointer;padding:0 4px;flex-shrink:0">✕</button>
+    </div>`;}).join('');
   document.getElementById('bst').disabled=false;
 }
-function addM(){const n=document.getElementById('an'),d=document.getElementById('ad');if(!n.value.trim()){n.focus();return;}stops.push({n:n.value.trim(),d:d.value,la:null,lo:null});n.value='';renderSetup(stops);}
+
+function delStop(i){
+  stops.splice(i,1);
+  renderSetup(stops);
+  if(stops.length<2)document.getElementById('bst').disabled=true;
+  saveLastRoute();
+}
+
+async function addM(){
+  const n=document.getElementById('an');
+  const d=document.getElementById('ad');
+  const gs=document.getElementById('geoStatus');
+  const name=n.value.trim();
+  if(!name){n.focus();return;}
+
+  // Try geocoding with Nominatim
+  gs.textContent='🔍 מחפש כתובת…';
+  let la=null,lo=null;
+  try{
+    const q=encodeURIComponent(name+', ישראל');
+    const res=await fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json&limit=1&accept-language=he`,
+      {headers:{'Accept':'application/json'}});
+    if(res.ok){
+      const data=await res.json();
+      if(data.length){
+        la=parseFloat(data[0].lat);
+        lo=parseFloat(data[0].lon);
+        gs.textContent='✅ '+data[0].display_name.split(',').slice(0,2).join(',');
+        gs.style.color='#6ee7b7';
+        setTimeout(()=>{gs.textContent='';},4000);
+      }else{
+        gs.textContent='⚠️ כתובת לא נמצאה — נוסף ללא מיקום';
+        gs.style.color='#fcd34d';
+        setTimeout(()=>{gs.textContent='';},4000);
+      }
+    }
+  }catch(e){
+    gs.textContent='⚠️ שגיאת חיפוש';
+    gs.style.color='#fca5a5';
+    setTimeout(()=>{gs.textContent='';},3000);
+  }
+
+  stops.push({n:name,d:d.value,la,lo});
+  n.value='';
+  renderSetup(stops);
+  saveLastRoute();
+}
 document.getElementById('an').addEventListener('keydown',e=>{if(e.key==='Enter')addM();});
 document.getElementById('ln').addEventListener('keydown',e=>{if(e.key==='Enter')doFetch();});
 
