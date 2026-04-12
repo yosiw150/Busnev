@@ -234,15 +234,28 @@ body.night .ddist{color:#ccc}
     </div>
     <!-- ETA boxes -->
     <div style="display:flex;flex-direction:column;gap:5px;flex-shrink:0;align-items:flex-end">
-      <!-- Next stop ETA -->
       <div style="background:rgba(59,130,246,.15);border:1px solid rgba(59,130,246,.3);border-radius:10px;padding:5px 10px;text-align:center;min-width:64px">
         <div class="detv" id="detv" style="color:#93c5fd">—</div>
         <div class="detl" style="color:#93c5fd">לתחנה</div>
       </div>
-      <!-- Final stop ETA -->
       <div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);border-radius:10px;padding:5px 10px;text-align:center;min-width:64px">
         <div class="detv" id="etaFinal" style="color:var(--a)">—</div>
         <div class="detl" style="color:var(--a)">לסוף קו</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Turn-by-turn navigation -->
+  <div id="turnStrip" style="display:none;background:rgba(10,15,26,.97);border-top:1px solid rgba(59,130,246,.3);padding:9px 14px;flex-shrink:0;z-index:999;position:relative">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="turnIcon" style="font-size:32px;flex-shrink:0;min-width:36px;text-align:center">⬆️</div>
+      <div style="flex:1;min-width:0">
+        <div id="turnInstr" style="font-size:calc(15px * var(--fs));font-weight:700;color:#93c5fd;line-height:1.2">מחשב מסלול…</div>
+        <div id="turnRoad" style="font-size:11px;color:var(--m);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+      </div>
+      <div style="text-align:center;flex-shrink:0">
+        <div id="turnDist" style="font-size:18px;font-weight:700;color:#93c5fd;font-family:monospace">—</div>
+        <div style="font-size:10px;color:var(--m)">עד פנייה</div>
       </div>
     </div>
   </div>
@@ -429,7 +442,100 @@ function hav(a,b,c,d){const R=6371000,da=(c-a)*Math.PI/180,db=(d-b)*Math.PI/180;
 function buildStops(raw){return raw.map((s,i)=>{let d='s';if(i===raw.length-1)d='a';else if(i>0){const b1=bear(raw[i-1].la,raw[i-1].lo,s.la,s.lo),b2=bear(s.la,s.lo,raw[i+1].la,raw[i+1].lo);d=bdir(b2-b1);}return{n:s.n,la:s.la,lo:s.lo,d};});}
 
 // ══════════════════════════════════════════════════
-//  ETA CALCULATION
+//  TURN-BY-TURN NAVIGATION (OSRM)
+// ══════════════════════════════════════════════════
+let turnSteps=[];
+let turnIdx=0;
+let routePolyline=null;
+let lastRouteFetch=0;
+const OSRM_BASE='https://router.project-osrm.org/route/v1/driving/';
+
+const TURN_ICONS={
+  'turn right':'↪️','turn left':'↩️',
+  'turn slight right':'↗️','turn slight left':'↖️',
+  'turn sharp right':'⤴️','turn sharp left':'⤵️',
+  'continue':'⬆️','straight':'⬆️',
+  'roundabout':'🔄','rotary':'🔄',
+  'arrive':'🛑','depart':'🚌',
+  'merge':'⬆️','fork':'↗️',
+  'off ramp':'↘️','on ramp':'↗️',
+};
+
+const TURN_HE={
+  'turn right':'פנה ימינה','turn left':'פנה שמאלה',
+  'turn slight right':'פנה מעט ימינה','turn slight left':'פנה מעט שמאלה',
+  'turn sharp right':'פנה חדות ימינה','turn sharp left':'פנה חדות שמאלה',
+  'continue':'המשך ישר','straight':'המשך ישר',
+  'roundabout':'כניסה לכיכר','rotary':'כניסה לכיכר',
+  'arrive':'הגעת לתחנה','depart':'צא לדרך',
+  'merge':'המשך','fork':'סע ימינה',
+  'off ramp':'צא מהכביש','on ramp':'כנס לכביש',
+};
+
+async function fetchOSRMRoute(fromLat,fromLon,toLat,toLon){
+  const now=Date.now();
+  if(now-lastRouteFetch<15000)return; // throttle — max once per 15sec
+  lastRouteFetch=now;
+  try{
+    const url=`${OSRM_BASE}${fromLon},${fromLat};${toLon},${toLat}?steps=true&annotations=false&geometries=geojson&overview=full&language=he`;
+    const res=await fetch(url);
+    if(!res.ok)return;
+    const data=await res.json();
+    if(data.code!=='Ok'||!data.routes?.length)return;
+    const route=data.routes[0];
+    // Extract steps
+    const steps=[];
+    for(const leg of route.legs){
+      for(const step of leg.steps){
+        const mod=step.maneuver?.modifier||'';
+        const type=step.maneuver?.type||'';
+        const key=(type+' '+mod).trim().toLowerCase();
+        steps.push({
+          icon:TURN_ICONS[key]||TURN_ICONS[type]||'⬆️',
+          text:TURN_HE[key]||TURN_HE[type]||'המשך',
+          road:step.name||'',
+          dist:step.distance,
+        });
+      }
+    }
+    turnSteps=steps;
+    turnIdx=0;
+    updateTurnDisplay();
+    // Draw route on map
+    if(map&&route.geometry){
+      if(routePolyline)map.removeLayer(routePolyline);
+      const coords=route.geometry.coordinates.map(c=>[c[1],c[0]]);
+      routePolyline=L.polyline(coords,{color:'#3b82f6',weight:5,opacity:.85}).addTo(map);
+    }
+    document.getElementById('turnStrip').style.display='block';
+  }catch(e){console.log('OSRM error:',e);}
+}
+
+function updateTurnDisplay(){
+  if(!turnSteps.length)return;
+  // Find current step based on distance
+  const step=turnSteps[Math.min(turnIdx,turnSteps.length-1)];
+  document.getElementById('turnIcon').textContent=step.icon;
+  document.getElementById('turnInstr').textContent=step.text;
+  document.getElementById('turnRoad').textContent=step.road?'ב'+step.road:'';
+  const d=step.dist;
+  document.getElementById('turnDist').textContent=d<1000?Math.round(d)+'מ':(d/1000).toFixed(1)+'ק"מ';
+}
+
+function updateTurnByPosition(lat,lon){
+  if(!turnSteps.length)return;
+  // Find closest step by accumulated distance
+  // Simple approach: advance step when within 30m of its end
+  if(turnIdx<turnSteps.length-1){
+    const step=turnSteps[turnIdx];
+    if(step.dist<30){turnIdx++;updateTurnDisplay();}
+    else{
+      // Decrease remaining distance estimate
+      turnSteps[turnIdx].dist=Math.max(0,step.dist-2);
+      updateTurnDisplay();
+    }
+  }
+}
 //  - dist to next stop (from GPS or between stops)
 //  - sum of inter-stop distances for remaining stops
 //  - +30 sec per stop for boarding/alighting
@@ -756,6 +862,11 @@ function startGPS(){
     if(!nearDone&&accuracy<200){nearDone=true;jumpNearest(lat,lon);}
     checkProx(lat,lon,speed);
     updateMapPos(lat,lon);
+    updateTurnByPosition(lat,lon);
+    // Fetch new route when stop changes or every 30sec
+    if(ci<stops.length&&stops[ci]?.la){
+      fetchOSRMRoute(lat,lon,stops[ci].la,stops[ci].lo);
+    }
     // Real-time direction
     if(ci<stops.length&&stops[ci]?.la&&myHeading!=null){
       const dist=hav(lat,lon,stops[ci].la,stops[ci].lo);
@@ -783,12 +894,54 @@ function jumpNearest(lat,lon){
   const sorted=stops.map((s,i)=>({i,d:s.la?hav(lat,lon,s.la,s.lo):Infinity})).sort((a,b)=>a.d-b.d);
   const best=sorted[0];
   if(!best||best.d>10000)return;
-  if(best.i===ci&&ci===0)return;
-  ci=best.i;updateUI();refreshStopColors();
+
+  // If already at first stop — no need to ask
+  if(best.i===0){return;}
+
+  // Ask user: start from beginning or nearest stop
+  showStartDialog(best.i,best.d,lat,lon);
+}
+
+function showStartDialog(nearIdx,nearDist,lat,lon){
+  const nearName=stops[nearIdx].n;
+  const dlg=document.createElement('div');
+  dlg.style.cssText='position:fixed;inset:0;z-index:4000;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;padding:20px';
+  dlg.innerHTML=`
+    <div style="background:#111827;border:1px solid #1e2d45;border-radius:18px;padding:22px;max-width:340px;width:100%;text-align:center">
+      <div style="font-size:30px;margin-bottom:10px">📍</div>
+      <div style="font-size:16px;font-weight:700;color:#f1f5f9;margin-bottom:6px">מאיפה להתחיל?</div>
+      <div style="font-size:13px;color:#64748b;margin-bottom:18px">
+        זוהה מיקומך ${Math.round(nearDist)} מ' מ<br>
+        <b style="color:#93c5fd">${nearName}</b>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <button onclick="chooseStart(${nearIdx},this.closest('[style*=fixed]'))" 
+          style="background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.4);color:#93c5fd;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+          📍 תחנה קרובה (${nearIdx+1})<br>
+          <span style="font-size:11px;font-weight:400">${nearName}</span>
+        </button>
+        <button onclick="chooseStart(0,this.closest('[style*=fixed]'))"
+          style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fcd34d;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit">
+          🚏 תחנה ראשונה (1)<br>
+          <span style="font-size:11px;font-weight:400">${stops[0].n}</span>
+        </button>
+      </div>
+    </div>`;
+  document.body.appendChild(dlg);
+}
+
+function chooseStart(idx,dlg){
+  if(dlg)dlg.remove();
+  if(idx===ci&&ci===0)return;
+  ci=idx;updateUI();refreshStopColors();
+  if(stops[ci]?.la){
+    if(busMarker)busMarker.setLatLng([stops[ci].la,stops[ci].lo]);
+    if(map)map.setView([stops[ci].la,stops[ci].lo],16,{animate:true});
+  }
   const nn=document.getElementById('nn2');
-  nn.textContent='📍 מיקומך: '+Math.round(best.d)+' מ׳ מ"'+stops[ci].n+'" — מתחיל מתחנה '+(ci+1);
-  nn.classList.add('show');setTimeout(()=>nn.classList.remove('show'),6000);
-  spk('נמצאת ליד תחנה '+stops[ci].n+'. מתחיל מכאן.',true);
+  nn.textContent='🚏 מתחיל מתחנה '+(ci+1)+': '+stops[ci].n;
+  nn.classList.add('show');setTimeout(()=>nn.classList.remove('show'),5000);
+  spk('מתחיל מתחנה '+stops[ci].n,true);
 }
 
 // ══════════════════════════════════════════════════
@@ -820,6 +973,10 @@ function checkProx(lat,lon,speed){
   if(dist<80&&!spkArr){
     spkArr=true;prevDistToStop=null;
     toast('🛑 עצור: '+s.n);spk('עצור בתחנה '+s.n,true);
+    // Clear turn nav for next segment
+    turnSteps=[];turnIdx=0;
+    document.getElementById('turnStrip').style.display='none';
+    if(routePolyline){map?.removeLayer(routePolyline);routePolyline=null;}
     setTimeout(()=>{
       if(ci<stops.length-1){ci++;spkApp=false;spkJun=false;spkArr=false;prevDistToStop=null;updateUI();refreshStopColors();setTimeout(()=>spk('תחנה הבאה: '+stops[ci]?.n,true),2000);}
       else setTimeout(()=>{document.getElementById('arrived').classList.add('show');spk('הגעת לתחנה הסופית. נסיעה טובה!',true);},600);
