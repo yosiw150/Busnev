@@ -256,13 +256,20 @@ body.night .ddist{color:#ccc}
       <div id="turnIcon" style="font-size:32px;flex-shrink:0;min-width:36px;text-align:center">⬆️</div>
       <div style="flex:1;min-width:0">
         <div id="turnInstr" style="font-size:calc(15px * var(--fs));font-weight:700;color:#93c5fd;line-height:1.2">מחשב מסלול…</div>
-        <div id="turnRoad" style="font-size:11px;color:var(--m);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div id="turnRoad" style="font-size:calc(13px * var(--fs));color:#f1f5f9;margin-top:2px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
       </div>
-      <div style="text-align:center;flex-shrink:0">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0">
         <div id="turnDist" style="font-size:18px;font-weight:700;color:#93c5fd;font-family:monospace">—</div>
         <div style="font-size:10px;color:var(--m)">עד פנייה</div>
+        <button onclick="spkTurn()" title="הקרא" style="background:rgba(59,130,246,.2);border:1px solid rgba(59,130,246,.3);color:#93c5fd;padding:2px 8px;border-radius:6px;font-size:13px;cursor:pointer">🔊</button>
       </div>
     </div>
+  </div>
+
+  <!-- Map zoom buttons (big, easy to tap while driving) -->
+  <div style="position:absolute;left:10px;bottom:220px;z-index:998;display:flex;flex-direction:column;gap:6px" id="zoomBtns">
+    <button onclick="mapZoom(1)" style="width:46px;height:46px;background:rgba(10,15,26,.9);border:1px solid var(--br);border-radius:12px;color:var(--t);font-size:26px;font-weight:700;cursor:pointer;line-height:1">＋</button>
+    <button onclick="mapZoom(-1)" style="width:46px;height:46px;background:rgba(10,15,26,.9);border:1px solid var(--br);border-radius:12px;color:var(--t);font-size:26px;font-weight:700;cursor:pointer;line-height:1">－</button>
   </div>
 
   <div class="sr2">
@@ -516,15 +523,35 @@ async function fetchOSRMRoute(fromLat,fromLon,toLat,toLon){
   }catch(e){console.log('OSRM error:',e);}
 }
 
+function mapZoom(delta){
+  if(!map)return;
+  map.setZoom(map.getZoom()+delta);
+}
+
+function spkTurn(){
+  if(!turnSteps.length)return;
+  const step=turnSteps[Math.min(turnIdx,turnSteps.length-1)];
+  const road=step.road?' ב'+step.road:'';
+  spk(step.text+road,true);
+}
+
+let lastSpokenStep=-1;
 function updateTurnDisplay(){
   if(!turnSteps.length)return;
-  // Find current step based on distance
   const step=turnSteps[Math.min(turnIdx,turnSteps.length-1)];
   document.getElementById('turnIcon').textContent=step.icon;
   document.getElementById('turnInstr').textContent=step.text;
-  document.getElementById('turnRoad').textContent=step.road?'ב'+step.road:'';
+  document.getElementById('turnRoad').textContent=step.road||'';
   const d=step.dist;
   document.getElementById('turnDist').textContent=d<1000?Math.round(d)+'מ':(d/1000).toFixed(1)+'ק"מ';
+
+  // הקרא פנייה אוטומטית (לא ישר) כשמתקרבים
+  const isStraight=['המשך ישר','צא לדרך'].includes(step.text);
+  if(!isStraight && d<250 && d>0 && turnIdx!==lastSpokenStep && voiceOn){
+    lastSpokenStep=turnIdx;
+    const road=step.road?' ב'+step.road:'';
+    setTimeout(()=>spk(step.text+road,false),300);
+  }
 }
 
 function updateTurnByPosition(lat,lon){
