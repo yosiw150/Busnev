@@ -1,144 +1,144 @@
 #!/usr/bin/env python3
-"""
-build_routes.py - Downloads Israel GTFS and builds routes.json
-"""
-import ftplib
+“””
+build_routes.py - Builds routes.json from OpenStreetMap Overpass API
+Fetches all bus routes in Israel at once — no FTP/HTTPS blocking issues.
+“””
 import urllib.request
-import zipfile
-import io
-import csv
+import urllib.parse
 import json
 import datetime
 import os
+import time
 
-FTP_HOST = "gtfs.mot.gov.il"
-FTP_FILE = "israel-public-transportation.zip"
+OVERPASS_URL = “https://overpass-api.de/api/interpreter”
 
-AGENCY_MAP = {
-    "3":  "אגד",
-    "5":  "דן",
-    "7":  "מטרופולין",
-    "8":  "קווים",
-    "16": "נת״ע",
-    "18": "אפיקים",
-    "25": "נתיב אקספרס",
-    "31": "סופרבוס",
-    "32": "אלקטרה אפיקים",
+# Operator name mapping
+
+OPERATOR_MAP = {
+“dan”: “דן”, “דן”: “דן”, “dan bus”: “דן”,
+“egged”: “אגד”, “אגד”: “אגד”,
+“metropoline”: “מטרופולין”, “מטרופולין”: “מטרופולין”,
+“kavim”: “קווים”, “קווים”: “קווים”,
+“nta”: “נת״ע”, “נת"ע”: “נת״ע”, “נתיב אקספרס”: “נתיב אקספרס”,
+“afikim”: “אפיקים”, “אפיקים”: “אפיקים”,
+“superbus”: “סופרבוס”, “סופרבוס”: “סופרבוס”,
+“electra afikim”: “אפיקים”,
 }
 
-def download_gtfs():
-    print("Trying FTP download...", flush=True)
-    try:
-        buf = io.BytesIO()
-        with ftplib.FTP(FTP_HOST, timeout=120) as ftp:
-            ftp.login()
-            size = ftp.size(FTP_FILE)
-            print(f"File size: {size//1024//1024} MB", flush=True)
-            ftp.retrbinary(f"RETR {FTP_FILE}", buf.write)
-        data = buf.getvalue()
-        print(f"Downloaded {len(data)//1024//1024} MB via FTP", flush=True)
-        return data
-    except Exception as e:
-        print(f"FTP failed: {e}", flush=True)
+def normalize_operator(op):
+if not op:
+return “אחר”
+op_lower = op.lower().strip()
+for key, val in OPERATOR_MAP.items():
+if key.lower() in op_lower:
+return val
+return op.strip()
 
-    print("Trying HTTP download...", flush=True)
-    for url in [
-        f"https://{FTP_HOST}/{FTP_FILE}",
-        f"http://{FTP_HOST}/{FTP_FILE}",
-        f"http://199.203.58.18/{FTP_FILE}",
-    ]:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "BusNav/1.0"})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                data = r.read()
-            print(f"Downloaded {len(data)//1024//1024} MB from {url}", flush=True)
-            return data
-        except Exception as e:
-            print(f"  {url}: {e}", flush=True)
+def fetch_overpass(query):
+data = urllib.parse.urlencode({“data”: query}).encode()
+req = urllib.request.Request(OVERPASS_URL, data=data, method=“POST”)
+req.add_header(“Content-Type”, “application/x-www-form-urlencoded”)
+req.add_header(“User-Agent”, “BusNav/1.0”)
+with urllib.request.urlopen(req, timeout=180) as r:
+return json.loads(r.read().decode(“utf-8”))
 
-    raise Exception("All download methods failed")
+def build_routes():
+print(“Fetching all Israel bus routes from OSM…”, flush=True)
 
-def read_csv(zf, name):
-    try:
-        with zf.open(name) as f:
-            return list(csv.DictReader(io.StringIO(f.read().decode("utf-8-sig"))))
-    except Exception as e:
-        print(f"  Warning: {name}: {e}", flush=True)
-        return []
+```
+# Fetch all bus route relations in Israel bounding box
+query = """
+```
 
-def build_routes(data):
-    print("Parsing GTFS...", flush=True)
-    zf = zipfile.ZipFile(io.BytesIO(data))
+[out:json][timeout:120];
+(
+relation[“type”=“route”][“route”=“bus”](29.4,34.2,33.4,35.9);
+);
+out body;
 
-    agencies = {r["agency_id"].strip(): AGENCY_MAP.get(r["agency_id"].strip(), r["agency_name"].strip())
-                for r in read_csv(zf, "agency.txt")}
-    print(f"  Agencies: {len(agencies)}", flush=True)
+> ;
+> out skel qt;
+> “””
 
-    stops_map = {r["stop_id"].strip(): {
-        "n": r["stop_name"].strip(),
-        "la": float(r["stop_lat"]),
-        "lo": float(r["stop_lon"])
-    } for r in read_csv(zf, "stops.txt")}
-    print(f"  Stops: {len(stops_map)}", flush=True)
+```
+print("  Querying Overpass API...", flush=True)
+data = fetch_overpass(query)
+print(f"  Got {len(data['elements'])} elements", flush=True)
 
-    routes_info = {r["route_id"].strip(): {
-        "ref": r["route_short_name"].strip(),
-        "name": r["route_long_name"].strip(),
-        "agency": r["agency_id"].strip()
-    } for r in read_csv(zf, "routes.txt")}
-    print(f"  Routes: {len(routes_info)}", flush=True)
+# Build node map
+node_map = {}
+for el in data["elements"]:
+    if el["type"] == "node":
+        node_map[el["id"]] = el
 
-    route_to_trip = {}
-    for r in read_csv(zf, "trips.txt"):
-        rid = r["route_id"].strip()
-        if rid not in route_to_trip:
-            route_to_trip[rid] = r["trip_id"].strip()
+# Process relations
+relations = [el for el in data["elements"] if el["type"] == "relation"]
+print(f"  Relations: {len(relations)}", flush=True)
 
-    wanted = set(route_to_trip.values())
-    print(f"  Reading stop_times for {len(wanted)} trips...", flush=True)
-    trip_stops = {}
-    for r in read_csv(zf, "stop_times.txt"):
-        tid = r["trip_id"].strip()
-        if tid not in wanted:
+output = {}
+processed = 0
+
+for rel in relations:
+    tags = rel.get("tags", {})
+    ref = tags.get("ref", "").strip()
+    if not ref:
+        continue
+    
+    # Get operator
+    op_raw = tags.get("operator", tags.get("network", tags.get("operator:en", "")))
+    operator = normalize_operator(op_raw)
+    
+    # Extract stops
+    stops = []
+    seen = set()
+    for member in rel.get("members", []):
+        if member["type"] != "node":
             continue
-        if tid not in trip_stops:
-            trip_stops[tid] = []
-        trip_stops[tid].append((int(r.get("stop_sequence", 0) or 0), r["stop_id"].strip()))
+        role = member.get("role", "")
+        if role not in ["stop", "stop_entry_only", "stop_exit_only", "platform", ""]:
+            continue
+        node = node_map.get(member["ref"])
+        if not node:
+            continue
+        ntags = node.get("tags", {})
+        name = ntags.get("name:he") or ntags.get("name") or f"תחנה {len(stops)+1}"
+        lat = node.get("lat")
+        lon = node.get("lon")
+        if lat is None or lon is None:
+            continue
+        # Skip duplicates
+        key = f"{lat:.4f},{lon:.4f}"
+        if key in seen:
+            continue
+        seen.add(key)
+        stops.append({"n": name, "la": lat, "lo": lon})
+    
+    if len(stops) < 2:
+        continue
+    
+    # Store — keep version with most stops
+    if operator not in output:
+        output[operator] = {}
+    
+    route_name = tags.get("name", f"קו {ref}")
+    if ref not in output[operator] or len(stops) > len(output[operator][ref]["stops"]):
+        output[operator][ref] = {"name": route_name, "stops": stops}
+    
+    processed += 1
 
-    output = {}
-    for rid, rinfo in routes_info.items():
-        ref = rinfo["ref"]
-        if not ref:
-            continue
-        aid = rinfo["agency"]
-        aname = agencies.get(aid, aid)
-        tid = route_to_trip.get(rid)
-        if not tid or tid not in trip_stops:
-            continue
-        deduped = []
-        for _, sid in sorted(trip_stops[tid]):
-            if not deduped or deduped[-1] != sid:
-                deduped.append(sid)
-        stop_objs = [stops_map[s] for s in deduped if s in stops_map]
-        if len(stop_objs) < 2:
-            continue
-        if aname not in output:
-            output[aname] = {}
-        if ref not in output[aname] or len(stop_objs) > len(output[aname][ref]["stops"]):
-            output[aname][ref] = {"name": rinfo["name"], "stops": stop_objs}
-
-    total = sum(len(v) for v in output.values())
-    print(f"  Built {total} routes across {len(output)} operators", flush=True)
-    return output
+total = sum(len(v) for v in output.values())
+print(f"  Processed {processed} relations → {total} unique routes across {len(output)} operators", flush=True)
+return output
+```
 
 def main():
-    data = download_gtfs()
-    routes = build_routes(data)
-    result = {"updated": datetime.date.today().isoformat(), "routes": routes}
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "routes.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"Done! routes.json = {os.path.getsize(path)//1024//1024} MB", flush=True)
+routes = build_routes()
+result = {“updated”: datetime.date.today().isoformat(), “routes”: routes}
+path = os.path.join(os.path.dirname(os.path.abspath(**file**)), “routes.json”)
+with open(path, “w”, encoding=“utf-8”) as f:
+json.dump(result, f, ensure_ascii=False, separators=(”,”, “:”))
+size = os.path.getsize(path) / 1024 / 1024
+print(f”Done! routes.json = {size:.1f} MB”, flush=True)
 
-if __name__ == "__main__":
-    main()
+if **name** == “**main**”:
+main()
